@@ -97,6 +97,11 @@ class Solver {
      */
     private void addReachable(JMethod method) {
         // TODO - finish me
+        if(callGraph.addReachableMethod(method)){
+            method.getIR().getStmts().forEach(stmt -> {
+                stmt.accept(stmtProcessor);
+            });
+        }
     }
 
     /**
@@ -105,6 +110,65 @@ class Solver {
     private class StmtProcessor implements StmtVisitor<Void> {
         // TODO - if you choose to implement addReachable()
         //  via visitor pattern, then finish me
+        @Override
+        public Void visit(New stmt) {
+            Pointer ptr = pointerFlowGraph.getVarPtr(stmt.getLValue());
+            workList.addEntry(ptr, new PointsToSet(heapModel.getObj(stmt)));
+            return null;
+        }
+        @Override
+        public Void visit(Copy stmt) {
+            addPFGEdge(pointerFlowGraph.getVarPtr(stmt.getRValue()), pointerFlowGraph.getVarPtr(stmt.getLValue()));
+            return null;
+        }
+        @Override
+        public Void visit(LoadField stmt) {
+            if(stmt.isStatic()){
+                addPFGEdge(pointerFlowGraph.getStaticField(stmt.getFieldRef().resolve()), pointerFlowGraph.getVarPtr(stmt.getLValue()));
+            }
+            return null;
+        }
+        @Override
+        public Void visit(StoreField stmt) {
+            if(stmt.isStatic()){
+                addPFGEdge(pointerFlowGraph.getVarPtr(stmt.getRValue()), pointerFlowGraph.getStaticField(stmt.getFieldRef().resolve()));
+            }
+            return null;
+        }
+        @Override
+        public Void visit(Invoke stmt){
+            if(stmt.isStatic()){
+                JMethod callee = resolveCallee(null, stmt);
+                if(callee != null){
+                    //processCall(stmt, callee);
+                    if(!callGraph.getCalleesOf(stmt).contains(callee)){
+                        CallKind kind = null;
+                        if(stmt.isVirtual()) kind = CallKind.VIRTUAL;
+                        else if(stmt.isSpecial()) kind = CallKind.SPECIAL;
+                        else if(stmt.isInterface()) kind = CallKind.INTERFACE;
+                        else if(stmt.isStatic()) kind = CallKind.STATIC;
+                        if(kind != null){
+                            callGraph.addEdge(new Edge<>(kind, stmt, callee));
+                            addReachable(callee);
+                            //参数
+                            List<Var> params = callee.getIR().getParams();
+                            for(int i = 0; i < params.size(); i++){
+                                addPFGEdge(pointerFlowGraph.getVarPtr(stmt.getRValue().getArg(i)), pointerFlowGraph.getVarPtr(params.get(i)));
+                            }
+                        }
+                        //返回值
+                        Var retvar = stmt.getLValue();
+                        if(retvar != null){
+                            List<Var> ret_vars = callee.getIR().getReturnVars();
+                            for(Var ret : ret_vars){
+                                addPFGEdge(pointerFlowGraph.getVarPtr(ret), pointerFlowGraph.getVarPtr(retvar));
+                            }
+                        }
+                    }
+                }
+            }
+            return null;
+        }
     }
 
     /**
@@ -112,6 +176,11 @@ class Solver {
      */
     private void addPFGEdge(Pointer source, Pointer target) {
         // TODO - finish me
+        if(!pointerFlowGraph.getSuccsOf(source).contains(target)){
+            pointerFlowGraph.addEdge(source, target);
+            PointsToSet pts = source.getPointsToSet();
+            if(!pts.isEmpty()) workList.addEntry(target, pts);//若source已经有指向的对象，则将source的指向对象传递给targets
+        }
     }
 
     /**
@@ -119,6 +188,31 @@ class Solver {
      */
     private void analyze() {
         // TODO - finish me
+        while(!workList.isEmpty()){
+            WorkList.Entry cur_entry = workList.pollEntry();
+            Pointer cur_ptr = cur_entry.pointer();
+            PointsToSet cur_pts = cur_entry.pointsToSet();
+            PointsToSet diff = propagate(cur_ptr, cur_pts);
+            if(cur_ptr instanceof VarPtr varPtr){
+                Var x = varPtr.getVar();
+                diff.forEach(obj -> {
+                    x.getStoreFields().forEach(store_stmt -> {// x.f = y
+                        addPFGEdge(pointerFlowGraph.getVarPtr(store_stmt.getRValue()), pointerFlowGraph.getInstanceField(obj, store_stmt.getFieldRef().resolve()));
+                    });
+                    x.getLoadFields().forEach(load_stmt -> {// y = x.f
+                        addPFGEdge(pointerFlowGraph.getInstanceField(obj, load_stmt.getFieldRef().resolve()), pointerFlowGraph.getVarPtr(load_stmt.getLValue()));
+                    });
+                    x.getStoreArrays().forEach(array_store_stmt -> {// x[i] = y
+                        addPFGEdge(pointerFlowGraph.getVarPtr(array_store_stmt.getRValue()), pointerFlowGraph.getArrayIndex(obj));
+                    });
+                    x.getLoadArrays().forEach(array_load_stmt -> {// y = x[i]
+                        addPFGEdge(pointerFlowGraph.getArrayIndex(obj), pointerFlowGraph.getVarPtr(array_load_stmt.getLValue()));
+                    });
+                    processCall(x, obj);
+                });
+            }
+
+        }
     }
 
     /**
@@ -127,7 +221,30 @@ class Solver {
      */
     private PointsToSet propagate(Pointer pointer, PointsToSet pointsToSet) {
         // TODO - finish me
-        return null;
+        //return null;
+        //计算差集 pts - pt(n)
+        PointsToSet diff = new PointsToSet();
+        PointsToSet ptn = pointer.getPointsToSet();
+        pointsToSet.forEach(obj -> {
+            if(!ptn.contains(obj)){
+                diff.addObject(obj);
+            }
+        });
+        if(!diff.isEmpty()){
+            // pt(n) = pt(n) ∪ diff
+            diff.forEach(obj -> {
+                ptn.addObject(obj);
+            });
+            //更新pointer的pointsToSet
+            ptn.forEach(obj->{
+                if(!pointer.getPointsToSet().contains(obj)) pointer.getPointsToSet().addObject(obj);
+            });
+            //更新worklist
+            pointerFlowGraph.getSuccsOf(pointer).forEach(succ -> {
+                workList.addEntry(succ, diff);
+            });
+        }
+        return diff;
     }
 
     /**
@@ -138,6 +255,34 @@ class Solver {
      */
     private void processCall(Var var, Obj recv) {
         // TODO - finish me
+        var.getInvokes().forEach(callsite -> {
+            JMethod callee = resolveCallee(recv, callsite); //等同dispatch
+            workList.addEntry(pointerFlowGraph.getVarPtr(callee.getIR().getThis()), new PointsToSet(recv));
+            if(!callGraph.getCalleesOf(callsite).contains(callee)){
+                CallKind kind = null;
+                if(callsite.isVirtual()) kind = CallKind.VIRTUAL;
+                else if(callsite.isSpecial()) kind = CallKind.SPECIAL;
+                else if(callsite.isInterface()) kind = CallKind.INTERFACE;
+                else if(callsite.isStatic()) kind = CallKind.STATIC;
+                if(kind != null){
+                    callGraph.addEdge(new Edge<>(kind, callsite, callee));
+                    addReachable(callee);
+                    //参数
+                    List<Var> params = callee.getIR().getParams();
+                    for(int i = 0; i < params.size(); i++){
+                        addPFGEdge(pointerFlowGraph.getVarPtr(callsite.getRValue().getArg(i)), pointerFlowGraph.getVarPtr(params.get(i)));
+                    }
+                }
+                //返回值
+                Var retvar = callsite.getLValue();
+                if(retvar != null){
+                    List<Var> ret_vars = callee.getIR().getReturnVars();
+                    for(Var ret : ret_vars){
+                        addPFGEdge(pointerFlowGraph.getVarPtr(ret), pointerFlowGraph.getVarPtr(retvar));
+                    }
+                }
+            }
+        });
     }
 
     /**

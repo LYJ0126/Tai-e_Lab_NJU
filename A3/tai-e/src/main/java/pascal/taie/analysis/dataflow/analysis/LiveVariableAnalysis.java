@@ -25,6 +25,8 @@ package pascal.taie.analysis.dataflow.analysis;
 import pascal.taie.analysis.dataflow.fact.SetFact;
 import pascal.taie.analysis.graph.cfg.CFG;
 import pascal.taie.config.AnalysisConfig;
+import pascal.taie.ir.exp.LValue;
+import pascal.taie.ir.exp.RValue;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.stmt.Stmt;
 
@@ -48,23 +50,45 @@ public class LiveVariableAnalysis extends
     @Override
     public SetFact<Var> newBoundaryFact(CFG<Stmt> cfg) {
         // TODO - finish me
-        return null;
+        return new SetFact<>();
+        //return null;
     }
 
     @Override
     public SetFact<Var> newInitialFact() {
         // TODO - finish me
-        return null;
+        //return null;
+        return new SetFact<>();
     }
 
     @Override
     public void meetInto(SetFact<Var> fact, SetFact<Var> target) {
         // TODO - finish me
+        // join fact into target
+        target.union(fact);
     }
 
     @Override
     public boolean transferNode(Stmt stmt, SetFact<Var> in, SetFact<Var> out) {
         // TODO - finish me
-        return false;
+        //in = use \cup (out - def)
+        SetFact<Var> use = new SetFact<>();
+        SetFact<Var> tempout = new SetFact<>();
+        tempout.union(out);
+        if(stmt.getDef().isPresent()) {
+            LValue def = stmt.getDef().get();
+            if(def instanceof Var){
+                tempout.remove((Var)def);
+            }
+        }
+        for (RValue var : stmt.getUses()) {
+            if(var instanceof Var){
+                use.add((Var)var);
+            }
+        }
+        use.union(tempout);
+        boolean flag = !use.equals(in);
+        in.set(use);
+        return flag;
     }
 }

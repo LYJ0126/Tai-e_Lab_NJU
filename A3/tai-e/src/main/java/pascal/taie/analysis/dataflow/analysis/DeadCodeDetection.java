@@ -44,10 +44,9 @@ import pascal.taie.ir.stmt.AssignStmt;
 import pascal.taie.ir.stmt.If;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.SwitchStmt;
+import pascal.taie.util.collection.Pair;
 
-import java.util.Comparator;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 public class DeadCodeDetection extends MethodAnalysis {
 
@@ -71,6 +70,83 @@ public class DeadCodeDetection extends MethodAnalysis {
         Set<Stmt> deadCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
         // TODO - finish me
         // Your task is to recognize dead code in ir and add it to deadCode
+        // bfs
+        Queue<Stmt> que = new java.util.LinkedList<>();
+        deadCode.addAll(cfg.getNodes());// add all nodes to deadCode, then remove live nodes
+        //visit set
+        Set<Stmt> visited = new HashSet<>();
+        que.add(cfg.getEntry());
+        //visited.add(cfg.getEntry());
+        while(!que.isEmpty()) {
+            Stmt stmt = que.poll();
+            visited.add(stmt);
+            // 赋值语句,左侧为不活跃变量且右侧无副作用
+            if(stmt instanceof AssignStmt<?,?> assignStmt) {
+                if(assignStmt.getLValue() instanceof Var lvalue && !liveVars.getOutFact(stmt).contains((lvalue))) {
+                    if(hasNoSideEffect(assignStmt.getRValue())) {
+                        // stmt为无用赋值语句
+                        //que.addAll(cfg.getSuccsOf(stmt));//bfs
+                        for(Stmt s : cfg.getSuccsOf(stmt)) {
+                            if(!visited.contains(s)) que.add(s);
+                        }
+                        continue;//不用删除这个stmt了
+                    }
+                }
+            }
+            //队列里的stmt一定是可达的
+            deadCode.remove(stmt);
+            // 不可达代码检测
+            // 首先，在队列中的Stmt一定是控制流可达的
+            if(stmt instanceof If stmtif) {
+                Value condition = ConstantPropagation.evaluate(stmtif.getCondition(), constants.getInFact(stmt));
+                if(condition.isConstant()) {
+                    //如果条件是常量,只保留分支可达的分支进入队列，另一个分支一定是分支不可达的，为dead code
+                    for(Edge<Stmt> e : cfg.getOutEdgesOf(stmt)) {
+                        if((condition.getConstant() == 1 && e.getKind() == Edge.Kind.IF_TRUE) || (condition.getConstant() == 0 && e.getKind() == Edge.Kind.IF_FALSE)) {
+                            //que.add(e.getTarget());
+                            if(!visited.contains(e.getTarget())) que.add(e.getTarget());
+                        }
+                    }
+                }
+                //else que.addAll(cfg.getSuccsOf(stmt));//如果条件不是常量，那么两个分支都是可达的
+                else{
+                    for(Stmt s : cfg.getSuccsOf(stmt)) {
+                        if(!visited.contains(s)) que.add(s);
+                    }
+                }
+            }
+            else if(stmt instanceof SwitchStmt switchStmt) {
+                Value casevalue = ConstantPropagation.evaluate(switchStmt.getVar(), constants.getInFact(stmt));
+                if(casevalue.isConstant()) {
+                    // 如果case的值是常量，看哪个case的值与之对应，若有则该case的target可达，加入队列。若无，则default target可达，加入队列
+                    boolean flag = false;
+                    List<Pair<Integer, Stmt>> cases = switchStmt.getCaseTargets();
+                    for (int i =0; i < cases.size(); i++) {
+                        if(cases.get(i).first() == casevalue.getConstant()) {
+                            //que.add(cases.get(i).second());
+                            if(!visited.contains(cases.get(i).second())) que.add(cases.get(i).second());
+                            flag = true;
+                            break;
+                        }
+                    }
+                    //if(!flag) que.add(switchStmt.getDefaultTarget());
+                    if(!flag && !visited.contains(switchStmt.getDefaultTarget())) que.add(switchStmt.getDefaultTarget());
+                }
+                //else que.addAll(cfg.getSuccsOf(stmt));//如果case的值不是常量，那么所有case都是可达的
+                else{
+                    for(Stmt s : cfg.getSuccsOf(stmt)) {
+                        if(!visited.contains(s)) que.add(s);
+                    }
+                }
+            }
+            //else que.addAll(cfg.getSuccsOf(stmt));//bfs
+            else {
+                for(Stmt s : cfg.getSuccsOf(stmt)) {
+                    if(!visited.contains(s)) que.add(s);
+                }
+            }
+        }
+        deadCode.remove(cfg.getExit());
         return deadCode;
     }
 

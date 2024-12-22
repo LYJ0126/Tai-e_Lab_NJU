@@ -40,5 +40,27 @@ class IterativeSolver<Node, Fact> extends Solver<Node, Fact> {
     @Override
     protected void doSolveBackward(CFG<Node> cfg, DataflowResult<Node, Fact> result) {
         // TODO - finish me
+        // if any node's in fact changes, then continue the loop
+        boolean changed = true;
+        while(changed) {
+            changed = false;
+            for(Node node : cfg){
+                if(!cfg.isExit(node)){
+                    Fact inFact = result.getInFact(node);
+                    Fact outFact = result.getOutFact(node);
+                    //outFact[node] = \cup_{s a successor of node} inFact[s]
+                    //inFact[node] = use[node] \cup (outFact[node] - def[node])
+                    for(Node s : cfg.getSuccsOf(node)){
+                        analysis.meetInto(result.getInFact(s), outFact);
+                    }
+                    //result.setOutFact(node, outFact);
+                    boolean flag =  analysis.transferNode(node, inFact, outFact);
+                    if(flag) {
+                        changed = true;
+                        //result.setInFact(node, inFact);
+                    }
+                }
+            }
+        }
     }
 }

@@ -22,9 +22,12 @@
 
 package pascal.taie.analysis.dataflow.inter;
 
+//import jas.Pair;
+import pascal.taie.util.collection.Pair;
 import pascal.taie.World;
 import pascal.taie.analysis.dataflow.analysis.constprop.CPFact;
 import pascal.taie.analysis.dataflow.analysis.constprop.ConstantPropagation;
+import pascal.taie.analysis.dataflow.analysis.constprop.Value;
 import pascal.taie.analysis.graph.cfg.CFG;
 import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.graph.icfg.CallEdge;
@@ -32,13 +35,24 @@ import pascal.taie.analysis.graph.icfg.CallToReturnEdge;
 import pascal.taie.analysis.graph.icfg.NormalEdge;
 import pascal.taie.analysis.graph.icfg.ReturnEdge;
 import pascal.taie.analysis.pta.PointerAnalysisResult;
+import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
 import pascal.taie.ir.exp.InvokeExp;
+import pascal.taie.ir.exp.InstanceFieldAccess;
+import pascal.taie.ir.exp.StaticFieldAccess;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.stmt.Invoke;
+import pascal.taie.ir.stmt.LoadField;
+import pascal.taie.ir.stmt.StoreField;
 import pascal.taie.ir.stmt.Stmt;
+import pascal.taie.language.classes.JClass;
 import pascal.taie.language.classes.JMethod;
+import pascal.taie.ir.proginfo.FieldRef;
+//import soot.jimple.FieldRef;
+
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Implementation of interprocedural constant propagation for int values.
@@ -49,6 +63,11 @@ public class InterConstantPropagation extends
     public static final String ID = "inter-constprop";
 
     private final ConstantPropagation cp;
+    public static final Map<Obj, Set<Var>> aliasMap = new HashMap<>();
+    public static final Map<Pair<?,?>, Value> valueMap = new HashMap<>();
+    public static final Map<Pair<JClass, FieldRef>, Set<LoadField>> staticloadFieldMap = new HashMap<>();
+    public static PointerAnalysisResult pta;
+
 
     public InterConstantPropagation(AnalysisConfig config) {
         super(config);
@@ -58,8 +77,24 @@ public class InterConstantPropagation extends
     @Override
     protected void initialize() {
         String ptaId = getOptions().getString("pta");
-        PointerAnalysisResult pta = World.get().getResult(ptaId);
+        //PointerAnalysisResult pta = World.get().getResult(ptaId);
+        pta = World.get().getResult(ptaId);
         // You can do initialization work here
+        for(Var var: pta.getVars()){
+            for(Obj obj: pta.getPointsToSet(var)){
+                Set<Var> temp = aliasMap.getOrDefault(obj, new HashSet<>());
+                temp.add(var);
+                aliasMap.put(obj, temp);
+            }
+        }
+        icfg.getNodes().forEach(stmt -> {
+            if(stmt instanceof LoadField loadstmt && loadstmt.getFieldAccess() instanceof StaticFieldAccess staticaccess){
+                Pair<JClass, FieldRef> accesspair = new Pair<>(staticaccess.getFieldRef().getDeclaringClass(), staticaccess.getFieldRef());
+                Set<LoadField> temp = staticloadFieldMap.getOrDefault(accesspair, new HashSet<>());
+                temp.add(loadstmt);
+                staticloadFieldMap.put(accesspair, temp);
+            }
+        });
     }
 
     @Override
@@ -86,36 +121,68 @@ public class InterConstantPropagation extends
     @Override
     protected boolean transferCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        return false;
+        //return false;
+        AtomicBoolean flag = new AtomicBoolean(false);
+        in.forEach((var, value) -> {
+            if (out.update(var, value)) {
+                flag.set(true);
+            }
+        });
+        return flag.get();
     }
 
     @Override
     protected boolean transferNonCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        return false;
+        //return false;
+        return cp.transferNode(stmt, in, out);//same as intraprocedural constant propagation
     }
 
     @Override
     protected CPFact transferNormalEdge(NormalEdge<Stmt> edge, CPFact out) {
         // TODO - finish me
-        return null;
+        //return null;
+        return out.copy();
     }
 
     @Override
     protected CPFact transferCallToReturnEdge(CallToReturnEdge<Stmt> edge, CPFact out) {
         // TODO - finish me
-        return null;
+        //return null;
+        Invoke callsite = (Invoke) edge.getSource();
+        Var lvar = callsite.getLValue();
+        CPFact res = out.copy();
+        if(lvar != null){
+            res.remove(lvar);
+        }
+        return res;
     }
 
     @Override
     protected CPFact transferCallEdge(CallEdge<Stmt> edge, CPFact callSiteOut) {
         // TODO - finish me
-        return null;
+        //return null;
+        Invoke callsite = (Invoke) edge.getSource();
+        CPFact res = new CPFact();
+        //pass argument values
+        List<Var> parameters = callsite.getRValue().getArgs();//传入的参数
+        List<Var> args = edge.getCallee().getIR().getParams();//函数的参数(形参)
+        for(int i = 0; i < args.size(); i++){
+            res.update(args.get(i), callSiteOut.get(parameters.get(i)));
+        }
+        return res;
     }
 
     @Override
     protected CPFact transferReturnEdge(ReturnEdge<Stmt> edge, CPFact returnOut) {
         // TODO - finish me
-        return null;
+        //return null;
+        Invoke callsite = (Invoke) edge.getCallSite();
+        CPFact res = new CPFact();
+        Var lvar = callsite.getLValue();
+        if(lvar != null){
+            edge.getReturnVars().forEach(var -> res.update(lvar, cp.meetValue(res.get(lvar), returnOut.get(var))));
+        }
+        return res;
     }
 }
